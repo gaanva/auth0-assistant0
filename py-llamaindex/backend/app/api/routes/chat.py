@@ -1,9 +1,12 @@
 import json
+import logging
 import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from llama_index.core.agent.workflow import AgentStream, ToolCall, ToolCallResult, AgentOutput
 from llama_index.core.memory import Memory
+
+logger = logging.getLogger(__name__)
 
 from auth0_ai.interrupts.auth0_interrupt import Auth0Interrupt
 from auth0_ai_llamaindex.context import set_ai_context
@@ -132,6 +135,13 @@ async def run_stream(
                         }
                         metadata = {"run_id": run_id}
                         yield f"event: messages/partial\ndata: {json.dumps([partial_msg, metadata])}\n\n"
+                elif isinstance(event, ToolCallResult):
+                    if event.tool_output.is_error:
+                        logger.error(
+                            "Tool '%s' failed: %s",
+                            event.tool_name,
+                            event.tool_output.content,
+                        )
                 elif isinstance(event, ToolCall):
                     tool_calls_seen.append(
                         {

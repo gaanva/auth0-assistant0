@@ -55,9 +55,9 @@ class PGVectorRetriever(BaseRetriever):
             results = db_session.exec(
                 text(
                     """
-                    SELECT id, content, document_id, meta, 1 - (embedding <=> :query_embedding::vector) as similarity
+                    SELECT id, content, document_id, meta, 1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity
                     FROM embedding
-                    WHERE 1 - (embedding <=> :query_embedding::vector) > 0.5
+                    WHERE 1 - (embedding <=> CAST(:query_embedding AS vector)) > 0.5
                     ORDER BY similarity DESC
                     LIMIT :limit
                     """

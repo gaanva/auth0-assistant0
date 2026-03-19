@@ -4,7 +4,6 @@ from openfga_sdk.client.models import ClientBatchCheckItem
 
 from app.core.rag import get_vector_store
 
-
 async def get_context_docs_fn(question: str, credentials: dict | None = None):
     """Use the tool when user asks for documents or projects or anything that is stored in the knowledge base."""
 
@@ -31,7 +30,9 @@ async def get_context_docs_fn(question: str, credentials: dict | None = None):
         ),
     )
 
-    documents = await retriever.aretrieve(question)
+    # Use sync retrieve — the async path in FGARetriever has a bug
+    # where NodeWithScore is used as a dict key (unhashable).
+    documents = retriever.retrieve(question)
     return "\n\n".join([document.get_content() for document in documents])
 
 
