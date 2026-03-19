@@ -2,6 +2,7 @@ from llama_index.llms.openai import OpenAI
 from llama_index.core.agent.workflow import FunctionAgent
 from datetime import date
 
+from app.core.config import settings
 from app.agents.tools.shop_online import shop_online
 from app.agents.tools.google_calendar import list_upcoming_events
 from app.agents.tools.gmail import gmail_search, gmail_create_draft
@@ -13,7 +14,7 @@ from app.agents.tools.user_info import create_user_info_tool
 from app.agents.tools.context_docs import create_context_docs_tool
 
 
-llm = OpenAI(model="gpt-4.1-mini")
+llm = OpenAI(model="gpt-4.1-mini", api_key=settings.OPENAI_API_KEY)
 
 
 def get_prompt():

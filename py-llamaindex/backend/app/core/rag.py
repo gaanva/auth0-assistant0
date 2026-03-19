@@ -1,7 +1,9 @@
 import uuid
 from llama_index.embeddings.openai import OpenAIEmbedding
-from sqlmodel import Session, select, text
-from sqlalchemy import func
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.schema import NodeWithScore, TextNode, QueryBundle, Document
+from sqlmodel import Session, text
 
 from app.core.config import settings
 from app.core.db import engine
@@ -12,90 +14,91 @@ embedding_model = OpenAIEmbedding(
     api_key=settings.OPENAI_API_KEY,
 )
 
+vector_store: "PGVectorStore | None" = None
+
 
 def generate_embeddings(
-    document_id: uuid.UUID, file_name: str, text_content: str
+    document_id: uuid.UUID, file_name: str, text: str
 ) -> list[Embedding]:
-    """Generate embeddings for a document using LlamaIndex."""
-    # Split text into chunks
-    chunks = _split_text(text_content, chunk_size=100, chunk_overlap=10)
+    """Generate embeddings for a document."""
+    splitter = SentenceSplitter(
+        chunk_size=100,
+        chunk_overlap=10,
+    )
 
-    embeddings_list = []
-    for chunk in chunks:
-        embedding = embedding_model.get_text_embedding(chunk)
-        embeddings_list.append(
-            Embedding(
-                document_id=document_id,
-                meta={
-                    "file_name": file_name,
-                    "document_id": str(document_id),
-                },
-                content=chunk,
-                embedding=embedding,
-            )
+    nodes = splitter.get_nodes_from_documents([Document(text=text)])
+    embeddings = embedding_model.get_text_embedding_batch(
+        [node.get_content() for node in nodes]
+    )
+
+    return [
+        Embedding(
+            document_id=document_id,
+            meta={
+                "file_name": file_name,
+                "document_id": str(document_id),
+            },
+            content=node.get_content(),
+            embedding=embedding,
         )
-
-    return embeddings_list
-
-
-def _split_text(text_content: str, chunk_size: int = 100, chunk_overlap: int = 10) -> list[str]:
-    """Split text into chunks with overlap using sentence-aware splitting."""
-    if not text_content.strip():
-        return []
-
-    sentences = []
-    for line in text_content.split("\n"):
-        line = line.strip()
-        if line:
-            sentences.append(line)
-
-    if not sentences:
-        return []
-
-    chunks = []
-    current_chunk_words: list[str] = []
-
-    for sentence in sentences:
-        words = sentence.split()
-        current_chunk_words.extend(words)
-
-        while len(current_chunk_words) >= chunk_size:
-            chunk_text = " ".join(current_chunk_words[:chunk_size])
-            chunks.append(chunk_text)
-            current_chunk_words = current_chunk_words[chunk_size - chunk_overlap:]
-
-    if current_chunk_words:
-        chunks.append(" ".join(current_chunk_words))
-
-    return chunks
+        for node, embedding in zip(nodes, embeddings)
+    ]
 
 
-async def find_relevant_content(query: str, limit: int = 4) -> list[dict]:
-    """Find relevant content using cosine similarity search."""
-    query_embedding = embedding_model.get_text_embedding(query)
+class PGVectorRetriever(BaseRetriever):
+    """Retriever that queries the pgvector embedding table."""
 
-    with Session(engine) as db_session:
-        # Use pgvector cosine distance operator
-        results = db_session.exec(
-            text(
-                """
-                SELECT content, document_id, 1 - (embedding <=> :query_embedding::vector) as similarity
-                FROM embedding
-                WHERE 1 - (embedding <=> :query_embedding::vector) > 0.5
-                ORDER BY similarity DESC
-                LIMIT :limit
-                """
-            ).bindparams(
-                query_embedding=str(query_embedding),
-                limit=limit,
-            )
-        ).all()
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        query_embedding = embedding_model.get_text_embedding(query_bundle.query_str)
 
-        return [
-            {
-                "content": row[0],
-                "document_id": str(row[1]),
-                "similarity": float(row[2]),
-            }
-            for row in results
-        ]
+        with Session(engine) as db_session:
+            results = db_session.exec(
+                text(
+                    """
+                    SELECT id, content, document_id, meta, 1 - (embedding <=> :query_embedding::vector) as similarity
+                    FROM embedding
+                    WHERE 1 - (embedding <=> :query_embedding::vector) > 0.5
+                    ORDER BY similarity DESC
+                    LIMIT :limit
+                    """
+                ).bindparams(
+                    query_embedding=str(query_embedding),
+                    limit=4,
+                )
+            ).all()
+
+            return [
+                NodeWithScore(
+                    node=TextNode(
+                        id_=str(row[0]),
+                        text=row[1],
+                        metadata={
+                            "document_id": str(row[2]),
+                            **(row[3] if isinstance(row[3], dict) else {}),
+                        },
+                    ),
+                    score=float(row[4]),
+                )
+                for row in results
+            ]
+
+    async def _aretrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        return self._retrieve(query_bundle)
+
+
+class PGVectorStore:
+    """Vector store backed by pgvector, mirroring the LangChain PGVectorStore interface."""
+
+    def as_retriever(self) -> PGVectorRetriever:
+        return PGVectorRetriever()
+
+
+async def get_vector_store() -> PGVectorStore:
+    global vector_store
+
+    if vector_store is not None:
+        return vector_store
+
+    vector_store = PGVectorStore()
+
+    return vector_store

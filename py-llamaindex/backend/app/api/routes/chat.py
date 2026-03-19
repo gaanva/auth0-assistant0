@@ -2,14 +2,21 @@ import json
 import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
+from llama_index.core.agent.workflow import AgentStream, ToolCall, ToolCallResult, AgentOutput
+from llama_index.core.memory import Memory
+
+from auth0_ai.interrupts.auth0_interrupt import Auth0Interrupt
+from auth0_ai_llamaindex.context import set_ai_context
 
 from app.core.auth import auth_client
+from app.core.auth0_ai import current_credentials
 from app.agents.assistant0 import create_agent
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
-# In-memory thread storage
-_threads: dict[str, dict] = {}
+# In-memory thread storage, scoped by user sub
+_threads: dict[str, dict[str, dict]] = {}  # user_sub -> thread_id -> thread
+_memories: dict[str, dict[str, Memory]] = {}  # user_sub -> thread_id -> Memory
 
 
 def _get_credentials(auth_session: dict) -> dict:
@@ -20,9 +27,15 @@ def _get_credentials(auth_session: dict) -> dict:
     }
 
 
-def _ensure_thread(thread_id: str) -> dict:
-    if thread_id not in _threads:
-        _threads[thread_id] = {
+def _get_user_sub(auth_session: dict) -> str:
+    return auth_session.get("user", {}).get("sub", "anonymous")
+
+
+def _ensure_thread(user_sub: str, thread_id: str) -> dict:
+    if user_sub not in _threads:
+        _threads[user_sub] = {}
+    if thread_id not in _threads[user_sub]:
+        _threads[user_sub][thread_id] = {
             "thread_id": thread_id,
             "created_at": "",
             "updated_at": "",
@@ -30,7 +43,17 @@ def _ensure_thread(thread_id: str) -> dict:
             "status": "idle",
             "values": {"messages": []},
         }
-    return _threads[thread_id]
+    return _threads[user_sub][thread_id]
+
+
+def _ensure_memory(user_sub: str, thread_id: str) -> Memory:
+    if user_sub not in _memories:
+        _memories[user_sub] = {}
+    if thread_id not in _memories[user_sub]:
+        _memories[user_sub][thread_id] = Memory.from_defaults(
+            session_id=thread_id,
+        )
+    return _memories[user_sub][thread_id]
 
 
 @agent_router.post("/threads")
@@ -38,8 +61,9 @@ async def create_thread(
     request: Request,
     auth_session=Depends(auth_client.require_session),
 ):
+    user_sub = _get_user_sub(auth_session)
     thread_id = str(uuid.uuid4())
-    thread = _ensure_thread(thread_id)
+    thread = _ensure_thread(user_sub, thread_id)
     return JSONResponse(content=thread)
 
 
@@ -51,8 +75,16 @@ async def run_stream(
 ):
     body = await request.json()
     credentials = _get_credentials(auth_session)
-    thread = _ensure_thread(thread_id)
+    user_sub = _get_user_sub(auth_session)
+    thread = _ensure_thread(user_sub, thread_id)
     messages = thread["values"].get("messages", [])
+    memory = _ensure_memory(user_sub, thread_id)
+
+    # Set credentials for auth0-ai Token Vault and CIBA flows
+    current_credentials.set(credentials)
+
+    # Set auth0-ai-llamaindex thread context
+    set_ai_context(thread_id)
 
     # Extract input messages
     input_data = body.get("input", {})
@@ -61,11 +93,13 @@ async def run_stream(
     # Add new messages to thread
     for msg in new_messages:
         msg_id = str(uuid.uuid4())
-        messages.append({
-            "type": msg.get("type", "human"),
-            "content": msg.get("content", ""),
-            "id": msg_id,
-        })
+        messages.append(
+            {
+                "type": msg.get("type", "human"),
+                "content": msg.get("content", ""),
+                "id": msg_id,
+            }
+        )
 
     # Get the last human message for the agent
     user_message = ""
@@ -79,62 +113,82 @@ async def run_stream(
     async def event_stream():
         # Send metadata event
         run_id = str(uuid.uuid4())
+        ai_msg_id = str(uuid.uuid4())
         yield f"event: metadata\ndata: {json.dumps({'run_id': run_id})}\n\n"
 
         try:
-            handler = agent.run(user_message)
-            response = await handler
+            handler = agent.run(user_message, memory=memory)
+            tool_calls_seen: list[dict] = []
 
-            # Extract the response content
+            # Stream events to capture tool calls and token deltas
+            async for event in handler.stream_events():
+                if isinstance(event, AgentStream):
+                    if event.delta:
+                        partial_msg = {
+                            "type": "ai",
+                            "content": event.response,
+                            "id": ai_msg_id,
+                            "tool_calls": [],
+                        }
+                        metadata = {"run_id": run_id}
+                        yield f"event: messages/partial\ndata: {json.dumps([partial_msg, metadata])}\n\n"
+                elif isinstance(event, ToolCall):
+                    tool_calls_seen.append(
+                        {
+                            "name": event.tool_name,
+                            "args": event.tool_kwargs,
+                            "id": getattr(event, "tool_id", str(uuid.uuid4())),
+                            "type": "tool_call",
+                        }
+                    )
+
+            response = await handler
             response_text = str(response)
 
-            # Create AI message
-            ai_msg_id = str(uuid.uuid4())
+            # Send complete message event
             ai_message = {
                 "type": "ai",
                 "content": response_text,
                 "id": ai_msg_id,
-                "tool_calls": [],
+                "tool_calls": tool_calls_seen,
             }
+            metadata = {"run_id": run_id}
+            yield f"event: messages/complete\ndata: {json.dumps([ai_message, metadata])}\n\n"
+
             messages.append(ai_message)
 
             # Send values event with all messages
-            values_data = {
-                "messages": messages,
-            }
+            values_data = {"messages": messages}
             yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
 
+        except Auth0Interrupt as e:
+            # Structured interrupt from auth0-ai (Token Vault, async authorization)
+            interrupt_data = e.to_json()
+            values_data = {"messages": messages}
+            yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
+
+            interrupts_payload = [
+                {
+                    "value": interrupt_data,
+                    "resumable": True,
+                    "ns": [f"interrupt_{uuid.uuid4().hex[:8]}"],
+                    "when": "during",
+                }
+            ]
+            yield f"event: updates\ndata: {json.dumps({'__interrupt': interrupts_payload})}\n\n"
+
+            thread["values"]["messages"] = messages
+            return
+
         except Exception as e:
-            error_str = str(e)
-            # Check if this is a Token Vault interrupt
-            if "token_vault" in error_str.lower() or "interrupt" in error_str.lower():
-                # Try to parse interrupt data from the error
-                try:
-                    interrupt_data = _parse_interrupt(e)
-                    if interrupt_data:
-                        values_data = {"messages": messages}
-                        yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
-
-                        interrupts_payload = [{
-                            "value": interrupt_data,
-                            "resumable": True,
-                            "ns": [f"interrupt_{uuid.uuid4().hex[:8]}"],
-                            "when": "during",
-                        }]
-                        yield f"event: updates\ndata: {json.dumps({'__interrupt': interrupts_payload})}\n\n"
-
-                        thread["values"]["messages"] = messages
-                        return
-                except Exception:
-                    pass
-
-            # Regular error
             error_msg_id = str(uuid.uuid4())
-            messages.append({
-                "type": "ai",
-                "content": f"An error occurred: {error_str}",
-                "id": error_msg_id,
-            })
+            messages.append(
+                {
+                    "type": "ai",
+                    "content": f"An error occurred: {e}",
+                    "id": error_msg_id,
+                }
+            )
             values_data = {"messages": messages}
             yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
 
@@ -157,15 +211,18 @@ async def get_thread_state(
     thread_id: str,
     auth_session=Depends(auth_client.require_session),
 ):
-    thread = _ensure_thread(thread_id)
-    return JSONResponse(content={
-        "values": thread["values"],
-        "next": [],
-        "tasks": [],
-        "metadata": {},
-        "created_at": thread.get("created_at", ""),
-        "parent_config": None,
-    })
+    user_sub = _get_user_sub(auth_session)
+    thread = _ensure_thread(user_sub, thread_id)
+    return JSONResponse(
+        content={
+            "values": thread["values"],
+            "next": [],
+            "tasks": [],
+            "metadata": {},
+            "created_at": thread.get("created_at", ""),
+            "parent_config": None,
+        }
+    )
 
 
 @agent_router.post("/threads/{thread_id}/state")
@@ -174,7 +231,8 @@ async def update_thread_state(
     request: Request,
     auth_session=Depends(auth_client.require_session),
 ):
-    thread = _ensure_thread(thread_id)
+    user_sub = _get_user_sub(auth_session)
+    _ensure_thread(user_sub, thread_id)
     return JSONResponse(content={"configurable": {"thread_id": thread_id}})
 
 
@@ -183,8 +241,33 @@ async def get_thread(
     thread_id: str,
     auth_session=Depends(auth_client.require_session),
 ):
-    thread = _ensure_thread(thread_id)
+    user_sub = _get_user_sub(auth_session)
+    thread = _ensure_thread(user_sub, thread_id)
     return JSONResponse(content=thread)
+
+
+@agent_router.post("/threads/{thread_id}/history")
+async def get_thread_history(
+    thread_id: str,
+    request: Request,
+    auth_session=Depends(auth_client.require_session),
+):
+    user_sub = _get_user_sub(auth_session)
+    thread = _ensure_thread(user_sub, thread_id)
+    # Return current state as a single history entry
+    return JSONResponse(
+        content=[
+            {
+                "values": thread["values"],
+                "next": [],
+                "tasks": [],
+                "metadata": {},
+                "created_at": thread.get("created_at", ""),
+                "parent_config": None,
+                "checkpoint": {"thread_id": thread_id},
+            }
+        ]
+    )
 
 
 @agent_router.post("/threads/search")
@@ -200,13 +283,17 @@ async def search_assistants(
     request: Request,
     auth_session=Depends(auth_client.require_session),
 ):
-    return JSONResponse(content=[{
-        "assistant_id": "agent",
-        "graph_id": "agent",
-        "name": "Agent",
-        "config": {},
-        "metadata": {},
-    }])
+    return JSONResponse(
+        content=[
+            {
+                "assistant_id": "agent",
+                "graph_id": "agent",
+                "name": "Agent",
+                "config": {},
+                "metadata": {},
+            }
+        ]
+    )
 
 
 @agent_router.post("/assistants/search")
@@ -214,34 +301,14 @@ async def search_assistants_post(
     request: Request,
     auth_session=Depends(auth_client.require_session),
 ):
-    return JSONResponse(content=[{
-        "assistant_id": "agent",
-        "graph_id": "agent",
-        "name": "Agent",
-        "config": {},
-        "metadata": {},
-    }])
-
-
-def _parse_interrupt(error: Exception) -> dict | None:
-    """Try to extract Token Vault interrupt data from an exception."""
-    error_str = str(error)
-    # Auth0 AI interrupts typically contain connection/scope info
-    try:
-        # Try to find JSON in the error message
-        import re
-        json_match = re.search(r'\{.*\}', error_str, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
-            if "connection" in data:
-                return data
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    # Check for auth0-ai interrupt attributes
-    if hasattr(error, 'interrupt_value'):
-        return error.interrupt_value
-    if hasattr(error, 'value'):
-        return error.value
-
-    return None
+    return JSONResponse(
+        content=[
+            {
+                "assistant_id": "agent",
+                "graph_id": "agent",
+                "name": "Agent",
+                "config": {},
+                "metadata": {},
+            }
+        ]
+    )

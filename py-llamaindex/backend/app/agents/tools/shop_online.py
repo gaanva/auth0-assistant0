@@ -6,14 +6,14 @@ from app.core.auth0_ai import with_async_authorization
 from app.core.config import settings
 
 
-async def shop_online_fn(product: str, quantity: int) -> str:
+async def shop_online_fn(product: str, qty: int, priceLimit: int | None = None) -> str:
     """Tool to buy products online."""
 
     api_url = settings.SHOP_API_URL
 
     if not api_url.strip():
         # No API set, mock a response
-        return f"Ordered {quantity} {product}"
+        return f"Ordered {qty} {product}"
 
     credentials = get_async_authorization_credentials()
 
@@ -27,7 +27,8 @@ async def shop_online_fn(product: str, quantity: int) -> str:
 
     data = {
         "product": product,
-        "quantity": quantity,
+        "qty": qty,
+        "priceLimit": priceLimit,
     }
 
     try:

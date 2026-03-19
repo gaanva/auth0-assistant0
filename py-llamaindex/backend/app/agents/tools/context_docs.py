@@ -1,13 +1,11 @@
 from llama_index.core.tools import FunctionTool
+from auth0_ai_llamaindex import FGARetriever
 from openfga_sdk.client.models import ClientBatchCheckItem
 
-from app.core.rag import find_relevant_content
-from app.core.fga import authorization_manager
+from app.core.rag import get_vector_store
 
 
-async def get_context_docs_fn(
-    question: str, credentials: dict | None = None
-) -> str:
+async def get_context_docs_fn(question: str, credentials: dict | None = None):
     """Use the tool when user asks for documents or projects or anything that is stored in the knowledge base."""
 
     if not credentials:
@@ -19,41 +17,22 @@ async def get_context_docs_fn(
         return "There is no user logged in."
 
     user_email = user.get("email")
+    vector_store = await get_vector_store()
 
-    # Get relevant documents
-    documents = await find_relevant_content(question, limit=25)
+    if not vector_store:
+        return "There is no vector store."
 
-    if not documents:
-        return "No relevant documents found."
-
-    # Filter by FGA authorization
-    if authorization_manager.openfga_client is None:
-        return "Authorization service not available."
-
-    # Batch check authorization
-    checks = [
-        ClientBatchCheckItem(
+    retriever = FGARetriever(
+        retriever=vector_store.as_retriever(),
+        build_query=lambda doc: ClientBatchCheckItem(
             user=f"user:{user_email}",
-            object=f"doc:{doc['document_id']}",
+            object=f"doc:{doc.metadata.get('document_id')}",
             relation="can_view",
-        )
-        for doc in documents
-    ]
+        ),
+    )
 
-    try:
-        response = await authorization_manager.openfga_client.batch_check(checks)
-        authorized_docs = []
-        for i, result in enumerate(response.result):
-            if result.allowed:
-                authorized_docs.append(documents[i])
-    except Exception:
-        # If batch check fails, return all documents
-        authorized_docs = documents
-
-    if not authorized_docs:
-        return "No authorized documents found."
-
-    return "\n\n".join([doc["content"] for doc in authorized_docs])
+    documents = await retriever.aretrieve(question)
+    return "\n\n".join([document.get_content() for document in documents])
 
 
 def create_context_docs_tool(credentials: dict | None = None) -> FunctionTool:

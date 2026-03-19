@@ -85,3 +85,7 @@ Agent configuration lives in `backend/app/agents/assistant0.py`. From here, you 
 ## License
 
 This project is open-sourced under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Author
+
+This project is built by [Deepu Sasidharan](https://github.com/deepu105).
