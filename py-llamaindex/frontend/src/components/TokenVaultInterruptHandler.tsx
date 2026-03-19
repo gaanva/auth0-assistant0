@@ -1,41 +1,37 @@
+import { useId } from "react";
 import { TokenVaultInterrupt } from "@auth0/ai/interrupts";
-import type { Interrupt } from "@langchain/langgraph-sdk";
+import type { Auth0InterruptionUI } from "@auth0/ai-vercel";
 
-import { TokenVaultConsent } from "@/components/auth0-ai/TokenVault";
+import { TokenVaultConsentPopup } from "@/components/auth0-ai/TokenVault/popup";
+
+type PossibleInterrupt = Auth0InterruptionUI | Record<string, unknown>;
 
 interface TokenVaultInterruptHandlerProps {
-  interrupt: Interrupt | undefined | null;
-  onFinish: () => void;
+  interrupt: PossibleInterrupt | undefined | null;
+  onFinish?: () => void;
   auth?: {
     connectPath?: string;
     returnTo?: string;
   };
 }
 
-export function TokenVaultInterruptHandler({
-  interrupt,
-  onFinish,
-  auth,
-}: TokenVaultInterruptHandlerProps) {
-  if (
-    !interrupt ||
-    !TokenVaultInterrupt.isInterrupt(interrupt.value)
-  ) {
+export function TokenVaultInterruptHandler({ interrupt, onFinish, auth }: TokenVaultInterruptHandlerProps) {
+  const id = useId();
+  if (!interrupt || !TokenVaultInterrupt.isInterrupt(interrupt)) {
     return null;
   }
 
   return (
-    <div key={interrupt.ns?.join("")} className="whitespace-pre-wrap">
-      <TokenVaultConsent
-        mode="popup"
-        interrupt={interrupt.value}
-        onFinish={onFinish}
+    <div key={id} className="whitespace-pre-wrap">
+      <TokenVaultConsentPopup
+        interrupt={interrupt}
         auth={auth}
         connectWidget={{
           title: "Authorization Required.",
-          description: interrupt.value.message,
+          description: interrupt.message,
           action: { label: "Authorize" },
         }}
+        onFinish={onFinish}
       />
     </div>
   );

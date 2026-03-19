@@ -1,20 +1,19 @@
-import { useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import { type UIMessage, DefaultChatTransport, generateId } from "ai";
+import { useChat } from "@ai-sdk/react";
+import { useState, useEffect, useMemo, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { ArrowDown, ArrowUpIcon, LoaderCircle } from "lucide-react";
 import { useQueryState } from "nuqs";
-import { useStream } from "@langchain/langgraph-sdk/react";
-import { type Message } from "@langchain/langgraph-sdk";
+import { useInterruptions } from "@auth0/ai-vercel/react";
 
 import { ChatMessageBubble } from "@/components/chat-message-bubble";
 import { TokenVaultInterruptHandler } from "@/components/TokenVaultInterruptHandler";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { getConnectUrl } from "@/lib/use-auth";
 
 function ChatMessages(props: {
-  messages: Message[];
+  messages: UIMessage[];
   emptyStateComponent: ReactNode;
   aiEmoji?: string;
   className?: string;
@@ -22,9 +21,7 @@ function ChatMessages(props: {
   return (
     <div className="flex flex-col max-w-[768px] mx-auto pb-12 w-full">
       {props.messages.map((m) => {
-        return (
-          <ChatMessageBubble key={m.id} message={m} aiEmoji={props.aiEmoji} allMessages={props.messages} />
-        );
+        return <ChatMessageBubble key={m.id} message={m} aiEmoji={props.aiEmoji} />;
       })}
     </div>
   );
@@ -35,11 +32,7 @@ function ScrollToBottom(props: { className?: string }) {
 
   if (isAtBottom) return null;
   return (
-    <Button
-      variant="outline"
-      className={props.className}
-      onClick={() => scrollToBottom()}
-    >
+    <Button variant="outline" className={props.className} onClick={() => scrollToBottom()}>
       <ArrowDown className="w-4 h-4" />
       <span>Scroll to bottom</span>
     </Button>
@@ -81,11 +74,7 @@ function ChatInput(props: {
             type="submit"
             disabled={props.loading}
           >
-            {props.loading ? (
-              <LoaderCircle className="animate-spin" />
-            ) : (
-              <ArrowUpIcon size={14} />
-            )}
+            {props.loading ? <LoaderCircle className="animate-spin" /> : <ArrowUpIcon size={14} />}
           </Button>
         </div>
       </div>
@@ -101,7 +90,6 @@ function StickyToBottomContent(props: {
 }) {
   const context = useStickToBottomContext();
 
-  // scrollRef will also switch between overflow: unset to overflow: auto
   return (
     <div
       ref={context.scrollRef}
@@ -117,56 +105,50 @@ function StickyToBottomContent(props: {
   );
 }
 
-export function ChatWindow(props: {
+/**
+ * Inner chat component with hooks. Mounted after thread messages are loaded.
+ */
+function ChatWindowInner(props: {
   endpoint: string;
+  chatId: string;
+  initialMessages: UIMessage[];
+  onThreadId: (id: string) => void;
   emptyStateComponent: ReactNode;
   placeholder?: string;
   emoji?: string;
 }) {
-  const [threadId, setThreadId] = useQueryState("threadId");
+  const { messages, sendMessage, status, toolInterrupt } = useInterruptions((handler) =>
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useChat({
+      chatId: props.chatId,
+      initialMessages: props.initialMessages,
+      transport: new DefaultChatTransport({
+        api: props.endpoint,
+        credentials: "include",
+      }),
+      generateId,
+      onError: handler((e: Error) => {
+        console.error("Error: ", e);
+        toast.error(`Error while processing your request`, { description: e.message });
+      }),
+    }),
+  );
+
   const [input, setInput] = useState("");
 
-  const fetchWithCredentials = (url: string | URL | Request, options = {}) => {
-    return fetch(url, {
-      ...options,
-      credentials: "include",
-    });
-  };
+  const isChatLoading = status === "streaming";
 
-  const chat = useStream({
-    apiUrl: `${window.location.origin}${props.endpoint}`,
-    assistantId: "agent",
-    threadId,
-    callerOptions: {
-      fetch: fetchWithCredentials,
-    },
-    onThreadId: setThreadId,
-    onError: (e: any) => {
-      console.error("Error: ", e);
-      toast.error(`Error while processing your request`, {
-        description: e.message,
-      });
-    },
-  });
+  // Persist thread ID to URL after first assistant response
+  useEffect(() => {
+    if (messages.some((m) => m.role === "assistant")) {
+      props.onThreadId(props.chatId);
+    }
+  }, [messages, props.chatId, props.onThreadId]);
 
-  function isChatLoading(): boolean {
-    return chat.isLoading;
-  }
-
-  async function sendMessage(e: FormEvent<HTMLFormElement>) {
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (isChatLoading()) return;
-    chat.submit(
-      { messages: [{ type: "human", content: input }] },
-      {
-        optimisticValues: (prev) => ({
-          messages: [
-            ...((prev?.messages as []) ?? []),
-            { type: "human", content: input, id: "temp" },
-          ],
-        }),
-      },
-    );
+    if (!input.trim() || isChatLoading) return;
+    await sendMessage({ text: input });
     setInput("");
   }
 
@@ -176,46 +158,23 @@ export function ChatWindow(props: {
         className="absolute inset-0"
         contentClassName="py-8 px-2"
         content={
-          chat.messages.length === 0 ? (
+          messages.length === 0 ? (
             <div>{props.emptyStateComponent}</div>
           ) : (
             <>
               <ChatMessages
                 aiEmoji={props.emoji}
-                messages={chat.messages}
+                messages={messages}
                 emptyStateComponent={props.emptyStateComponent}
               />
               <div className="flex flex-col max-w-[768px] mx-auto pb-12 w-full">
-                {!!chat.interrupt?.value && (
-                  <TokenVaultInterruptHandler
-                    auth={{
-                      connectPath: getConnectUrl(),
-                      returnTo: new URL(
-                        "/close",
-                        window.location.origin,
-                      ).toString(),
-                    }}
-                    interrupt={{
-                      ...chat.interrupt,
-                      value: {
-                        ...chat.interrupt.value,
-                        requiredScopes:
-                          (
-                            chat.interrupt.value as {
-                              required_scopes: [string];
-                            }
-                          ).required_scopes || [],
-                        authorizationParams:
-                          (
-                            chat.interrupt.value as {
-                              authorization_params: Record<string, string>;
-                            }
-                          ).authorization_params || {},
-                      },
-                    }}
-                    onFinish={() => chat.submit(null)}
-                  />
-                )}
+                <TokenVaultInterruptHandler
+                  interrupt={toolInterrupt}
+                  auth={{
+                    connectPath: "/api/auth/connect",
+                    returnTo: new URL("/close", window.location.origin).toString(),
+                  }}
+                />
               </div>
             </>
           )
@@ -226,13 +185,61 @@ export function ChatWindow(props: {
             <ChatInput
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onSubmit={sendMessage}
-              loading={isChatLoading()}
+              onSubmit={onSubmit}
+              loading={isChatLoading}
               placeholder={props.placeholder ?? "What can I help you with?"}
             ></ChatInput>
           </div>
         }
       ></StickyToBottomContent>
     </StickToBottom>
+  );
+}
+
+/**
+ * Outer wrapper that handles thread loading before mounting the chat hooks.
+ */
+export function ChatWindow(props: {
+  endpoint: string;
+  emptyStateComponent: ReactNode;
+  placeholder?: string;
+  emoji?: string;
+}) {
+  const [threadId, setThreadId] = useQueryState("threadId");
+  const chatId = useMemo(() => threadId || generateId(), [threadId]);
+  const [initialMessages, setInitialMessages] = useState<UIMessage[]>([]);
+  const [ready, setReady] = useState(!threadId);
+
+  useEffect(() => {
+    if (threadId) {
+      fetch(`/api/agent/threads/${threadId}`, { credentials: "include" })
+        .then((r) => r.json())
+        .then((data) => {
+          setInitialMessages(data.messages || []);
+          setReady(true);
+        })
+        .catch(() => setReady(true));
+    }
+  }, [threadId]);
+
+  if (!ready) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <LoaderCircle className="animate-spin w-6 h-6 text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <ChatWindowInner
+      key={chatId}
+      endpoint={props.endpoint}
+      chatId={chatId}
+      initialMessages={initialMessages}
+      onThreadId={setThreadId}
+      emptyStateComponent={props.emptyStateComponent}
+      placeholder={props.placeholder}
+      emoji={props.emoji}
+    />
   );
 }

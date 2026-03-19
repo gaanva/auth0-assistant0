@@ -3,7 +3,8 @@ import logging
 import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from llama_index.core.agent.workflow import AgentStream, ToolCall, ToolCallResult, AgentOutput
+from llama_index.core.agent.workflow import AgentStream, ToolCall, ToolCallResult
+from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import Memory
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,7 @@ from app.agents.assistant0 import create_agent
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
 # In-memory thread storage, scoped by user sub
-_threads: dict[str, dict[str, dict]] = {}  # user_sub -> thread_id -> thread
-_memories: dict[str, dict[str, Memory]] = {}  # user_sub -> thread_id -> Memory
+_threads: dict[str, dict[str, list[dict]]] = {}  # user_sub -> thread_id -> messages
 
 
 def _get_credentials(auth_session: dict) -> dict:
@@ -34,216 +34,41 @@ def _get_user_sub(auth_session: dict) -> str:
     return auth_session.get("user", {}).get("sub", "anonymous")
 
 
-def _ensure_thread(user_sub: str, thread_id: str) -> dict:
+def _get_thread_messages(user_sub: str, thread_id: str) -> list[dict]:
+    return _threads.get(user_sub, {}).get(thread_id, [])
+
+
+def _save_message(user_sub: str, thread_id: str, message: dict):
     if user_sub not in _threads:
         _threads[user_sub] = {}
     if thread_id not in _threads[user_sub]:
-        _threads[user_sub][thread_id] = {
-            "thread_id": thread_id,
-            "created_at": "",
-            "updated_at": "",
-            "metadata": {},
-            "status": "idle",
-            "values": {"messages": []},
-        }
-    return _threads[user_sub][thread_id]
+        _threads[user_sub][thread_id] = []
+    _threads[user_sub][thread_id].append(message)
 
 
-def _ensure_memory(user_sub: str, thread_id: str) -> Memory:
-    if user_sub not in _memories:
-        _memories[user_sub] = {}
-    if thread_id not in _memories[user_sub]:
-        _memories[user_sub][thread_id] = Memory.from_defaults(
-            session_id=thread_id,
-        )
-    return _memories[user_sub][thread_id]
+def _extract_text(msg: dict) -> str:
+    """Extract text content from a UI message (AI SDK format)."""
+    for part in msg.get("parts", []):
+        if isinstance(part, dict) and part.get("type") == "text":
+            return part.get("text", "")
+    # Fallback to content field
+    return msg.get("content", "")
 
 
-@agent_router.post("/threads")
-async def create_thread(
-    request: Request,
-    auth_session=Depends(auth_client.require_session),
-):
-    user_sub = _get_user_sub(auth_session)
-    thread_id = str(uuid.uuid4())
-    thread = _ensure_thread(user_sub, thread_id)
-    return JSONResponse(content=thread)
+def _build_memory(chat_id: str, messages: list[dict]) -> Memory:
+    """Build a LlamaIndex Memory from AI SDK messages."""
+    chat_history = []
+    for msg in messages[:-1]:  # Exclude the last user message
+        role = MessageRole.USER if msg.get("role") == "user" else MessageRole.ASSISTANT
+        text = _extract_text(msg)
+        if text:
+            chat_history.append(ChatMessage(role=role, content=text))
+    return Memory.from_defaults(session_id=chat_id, chat_history=chat_history)
 
 
-@agent_router.post("/threads/{thread_id}/runs/stream")
-async def run_stream(
-    thread_id: str,
-    request: Request,
-    auth_session=Depends(auth_client.require_session),
-):
-    body = await request.json()
-    credentials = _get_credentials(auth_session)
-    user_sub = _get_user_sub(auth_session)
-    thread = _ensure_thread(user_sub, thread_id)
-    messages = thread["values"].get("messages", [])
-    memory = _ensure_memory(user_sub, thread_id)
-
-    # Set credentials for auth0-ai Token Vault and CIBA flows
-    current_credentials.set(credentials)
-
-    # Set auth0-ai-llamaindex thread context
-    set_ai_context(thread_id)
-
-    # Extract input messages
-    input_data = body.get("input", {})
-    new_messages = input_data.get("messages", [])
-
-    # Add new messages to thread
-    for msg in new_messages:
-        msg_id = str(uuid.uuid4())
-        messages.append(
-            {
-                "type": msg.get("type", "human"),
-                "content": msg.get("content", ""),
-                "id": msg_id,
-            }
-        )
-
-    # Get the last human message for the agent
-    user_message = ""
-    for msg in reversed(messages):
-        if msg.get("type") == "human":
-            user_message = msg.get("content", "")
-            break
-
-    agent = create_agent(credentials)
-
-    async def event_stream():
-        # Send metadata event
-        run_id = str(uuid.uuid4())
-        ai_msg_id = str(uuid.uuid4())
-        yield f"event: metadata\ndata: {json.dumps({'run_id': run_id})}\n\n"
-
-        try:
-            handler = agent.run(user_message, memory=memory)
-            tool_calls_seen: list[dict] = []
-
-            # Stream events to capture tool calls and token deltas
-            async for event in handler.stream_events():
-                if isinstance(event, AgentStream):
-                    if event.delta:
-                        partial_msg = {
-                            "type": "ai",
-                            "content": event.response,
-                            "id": ai_msg_id,
-                            "tool_calls": [],
-                        }
-                        metadata = {"run_id": run_id}
-                        yield f"event: messages/partial\ndata: {json.dumps([partial_msg, metadata])}\n\n"
-                elif isinstance(event, ToolCallResult):
-                    if event.tool_output.is_error:
-                        logger.error(
-                            "Tool '%s' failed: %s",
-                            event.tool_name,
-                            event.tool_output.content,
-                        )
-                elif isinstance(event, ToolCall):
-                    tool_calls_seen.append(
-                        {
-                            "name": event.tool_name,
-                            "args": event.tool_kwargs,
-                            "id": getattr(event, "tool_id", str(uuid.uuid4())),
-                            "type": "tool_call",
-                        }
-                    )
-
-            response = await handler
-            response_text = str(response)
-
-            # Send complete message event
-            ai_message = {
-                "type": "ai",
-                "content": response_text,
-                "id": ai_msg_id,
-                "tool_calls": tool_calls_seen,
-            }
-            metadata = {"run_id": run_id}
-            yield f"event: messages/complete\ndata: {json.dumps([ai_message, metadata])}\n\n"
-
-            messages.append(ai_message)
-
-            # Send values event with all messages
-            values_data = {"messages": messages}
-            yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
-
-        except Auth0Interrupt as e:
-            # Structured interrupt from auth0-ai (Token Vault, async authorization)
-            interrupt_data = e.to_json()
-            values_data = {"messages": messages}
-            yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
-
-            interrupts_payload = [
-                {
-                    "value": interrupt_data,
-                    "resumable": True,
-                    "ns": [f"interrupt_{uuid.uuid4().hex[:8]}"],
-                    "when": "during",
-                }
-            ]
-            yield f"event: updates\ndata: {json.dumps({'__interrupt': interrupts_payload})}\n\n"
-
-            thread["values"]["messages"] = messages
-            return
-
-        except Exception as e:
-            error_msg_id = str(uuid.uuid4())
-            messages.append(
-                {
-                    "type": "ai",
-                    "content": f"An error occurred: {e}",
-                    "id": error_msg_id,
-                }
-            )
-            values_data = {"messages": messages}
-            yield f"event: values\ndata: {json.dumps(values_data)}\n\n"
-
-        thread["values"]["messages"] = messages
-        yield "event: end\ndata: {}\n\n"
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@agent_router.get("/threads/{thread_id}/state")
-async def get_thread_state(
-    thread_id: str,
-    auth_session=Depends(auth_client.require_session),
-):
-    user_sub = _get_user_sub(auth_session)
-    thread = _ensure_thread(user_sub, thread_id)
-    return JSONResponse(
-        content={
-            "values": thread["values"],
-            "next": [],
-            "tasks": [],
-            "metadata": {},
-            "created_at": thread.get("created_at", ""),
-            "parent_config": None,
-        }
-    )
-
-
-@agent_router.post("/threads/{thread_id}/state")
-async def update_thread_state(
-    thread_id: str,
-    request: Request,
-    auth_session=Depends(auth_client.require_session),
-):
-    user_sub = _get_user_sub(auth_session)
-    _ensure_thread(user_sub, thread_id)
-    return JSONResponse(content={"configurable": {"thread_id": thread_id}})
+def _sse(data: dict) -> str:
+    """Format data as an SSE event."""
+    return f"data: {json.dumps(data)}\n\n"
 
 
 @agent_router.get("/threads/{thread_id}")
@@ -252,73 +77,153 @@ async def get_thread(
     auth_session=Depends(auth_client.require_session),
 ):
     user_sub = _get_user_sub(auth_session)
-    thread = _ensure_thread(user_sub, thread_id)
-    return JSONResponse(content=thread)
+    messages = _get_thread_messages(user_sub, thread_id)
+    return JSONResponse(content={"messages": messages})
 
 
-@agent_router.post("/threads/{thread_id}/history")
-async def get_thread_history(
-    thread_id: str,
+@agent_router.post("/chat")
+async def chat_stream(
     request: Request,
     auth_session=Depends(auth_client.require_session),
 ):
+    body = await request.json()
+    chat_id = body.get("id") or body.get("chatId") or str(uuid.uuid4())
+    messages_data = body.get("messages", [])
+
+    credentials = _get_credentials(auth_session)
     user_sub = _get_user_sub(auth_session)
-    thread = _ensure_thread(user_sub, thread_id)
-    # Return current state as a single history entry
-    return JSONResponse(
-        content=[
-            {
-                "values": thread["values"],
-                "next": [],
-                "tasks": [],
-                "metadata": {},
-                "created_at": thread.get("created_at", ""),
-                "parent_config": None,
-                "checkpoint": {"thread_id": thread_id},
+    current_credentials.set(credentials)
+    set_ai_context(chat_id)
+
+    # Extract last user message
+    user_message = ""
+    for msg in reversed(messages_data):
+        if msg.get("role") == "user":
+            user_message = _extract_text(msg)
+            break
+
+    memory = _build_memory(chat_id, messages_data)
+    agent = create_agent(credentials)
+
+    async def event_stream():
+        msg_id = str(uuid.uuid4())
+        text_part_id = str(uuid.uuid4())
+        text_started = False
+        response_parts: list[str] = []
+
+        yield _sse({"type": "start", "messageId": msg_id})
+
+        try:
+            handler = agent.run(user_message, memory=memory)
+
+            async for event in handler.stream_events():
+                if isinstance(event, ToolCall):
+                    yield _sse({
+                        "type": "tool-input-start",
+                        "toolCallId": event.tool_id,
+                        "toolName": event.tool_name,
+                    })
+                    yield _sse({
+                        "type": "tool-input-available",
+                        "toolCallId": event.tool_id,
+                        "toolName": event.tool_name,
+                        "input": event.tool_kwargs,
+                    })
+                elif isinstance(event, ToolCallResult):
+                    if event.tool_output.is_error:
+                        logger.error(
+                            "Tool '%s' failed: %s (exception type: %s)",
+                            event.tool_name,
+                            event.tool_output.content,
+                            type(event.tool_output.exception).__name__ if event.tool_output.exception else "None",
+                        )
+                        if isinstance(event.tool_output.exception, Auth0Interrupt):
+                            interrupt = event.tool_output.exception
+                            interrupt_data = interrupt.to_json()
+                            # Convert snake_case to camelCase for AI SDK frontend
+                            if "required_scopes" in interrupt_data:
+                                interrupt_data["requiredScopes"] = interrupt_data.pop("required_scopes")
+                            if "authorization_params" in interrupt_data:
+                                interrupt_data["authorizationParams"] = interrupt_data.pop("authorization_params")
+                            interrupt_data.setdefault("behavior", "reload")
+                            interrupt_data["toolCall"] = {
+                                "id": event.tool_id,
+                                "name": event.tool_name,
+                                "args": event.tool_kwargs,
+                            }
+                            error_text = f"AUTH0_AI_INTERRUPTION:{json.dumps(interrupt_data)}"
+                            yield _sse({"type": "error", "errorText": error_text})
+                            yield "data: [DONE]\n\n"
+                            return
+                        yield _sse({
+                            "type": "tool-output-error",
+                            "toolCallId": event.tool_id,
+                            "errorText": event.tool_output.content,
+                        })
+                    else:
+                        yield _sse({
+                            "type": "tool-output-available",
+                            "toolCallId": event.tool_id,
+                            "output": event.tool_output.content,
+                        })
+                elif isinstance(event, AgentStream):
+                    if event.delta:
+                        response_parts.append(event.delta)
+                        if not text_started:
+                            yield _sse({"type": "text-start", "id": text_part_id})
+                            text_started = True
+                        yield _sse({
+                            "type": "text-delta",
+                            "delta": event.delta,
+                            "id": text_part_id,
+                        })
+
+            await handler
+
+            if text_started:
+                yield _sse({"type": "text-end", "id": text_part_id})
+
+            # Persist messages for thread storage
+            user_msg_id = str(uuid.uuid4())
+            _save_message(user_sub, chat_id, {
+                "id": user_msg_id,
+                "role": "user",
+                "parts": [{"type": "text", "text": user_message}],
+            })
+            _save_message(user_sub, chat_id, {
+                "id": msg_id,
+                "role": "assistant",
+                "parts": [{"type": "text", "text": "".join(response_parts)}],
+            })
+
+            yield _sse({"type": "finish"})
+
+        except Auth0Interrupt as e:
+            interrupt_data = e.to_json()
+            if "required_scopes" in interrupt_data:
+                interrupt_data["requiredScopes"] = interrupt_data.pop("required_scopes")
+            if "authorization_params" in interrupt_data:
+                interrupt_data["authorizationParams"] = interrupt_data.pop("authorization_params")
+            interrupt_data["toolCall"] = {
+                "id": str(uuid.uuid4()),
+                "name": "unknown",
+                "args": {},
             }
-        ]
-    )
+            error_text = f"AUTH0_AI_INTERRUPTION:{json.dumps(interrupt_data)}"
+            yield _sse({"type": "error", "errorText": error_text})
 
+        except Exception as e:
+            yield _sse({"type": "error", "errorText": str(e)})
 
-@agent_router.post("/threads/search")
-async def search_threads(
-    request: Request,
-    auth_session=Depends(auth_client.require_session),
-):
-    return JSONResponse(content=[])
+        yield "data: [DONE]\n\n"
 
-
-@agent_router.get("/assistants/search")
-async def search_assistants(
-    request: Request,
-    auth_session=Depends(auth_client.require_session),
-):
-    return JSONResponse(
-        content=[
-            {
-                "assistant_id": "agent",
-                "graph_id": "agent",
-                "name": "Agent",
-                "config": {},
-                "metadata": {},
-            }
-        ]
-    )
-
-
-@agent_router.post("/assistants/search")
-async def search_assistants_post(
-    request: Request,
-    auth_session=Depends(auth_client.require_session),
-):
-    return JSONResponse(
-        content=[
-            {
-                "assistant_id": "agent",
-                "graph_id": "agent",
-                "name": "Agent",
-                "config": {},
-                "metadata": {},
-            }
-        ]
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "x-vercel-ai-ui-message-stream": "v1",
+        },
     )

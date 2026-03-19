@@ -1,48 +1,131 @@
-import { type Message, type AIMessage } from '@langchain/langgraph-sdk';
-import { Loader2, CheckCircle } from 'lucide-react';
+import { type UIMessage } from "ai";
+import { Loader2, CheckCircle, AlertCircle } from "lucide-react";
 
-import { cn } from '@/lib/utils';
-import { MemoizedMarkdown } from './memoize-markdown';
+import { cn } from "@/lib/utils";
+import { MemoizedMarkdown } from "./memoize-markdown";
 
-function ToolCallDisplay({ 
-  toolCall, 
-  isRunning,
-  messageContent 
-}: { 
-  toolCall: NonNullable<AIMessage['tool_calls']>[0]; 
-  isRunning: boolean;
-  messageContent?: string;
+function uiMessageToText(message: UIMessage): string {
+  if (Array.isArray((message as any).parts)) {
+    return (message as any).parts
+      .map((p: any) => {
+        if (typeof p === "string") return p;
+        if (typeof p?.text === "string") return p.text;
+        if (typeof p?.content === "string") return p.content;
+        return "";
+      })
+      .join("");
+  }
+  return (message as any).content ?? "";
+}
+
+function getToolCallsFromMessage(message: UIMessage): Array<{
+  toolCallId: string;
+  toolName: string;
+  args: any;
+  result?: any;
+  status: "pending" | "complete" | "error";
+}> {
+  const parts = (message as any).parts;
+  if (!Array.isArray(parts)) return [];
+
+  const toolCalls: Array<{
+    toolCallId: string;
+    toolName: string;
+    args: any;
+    result?: any;
+    status: "pending" | "complete" | "error";
+  }> = [];
+
+  parts.forEach((part: any) => {
+    if (part?.type && part.type.startsWith("tool-") && part.toolCallId) {
+      const toolName = part.type.replace("tool-", "");
+
+      let status: "pending" | "complete" | "error" = "pending";
+      if (part.state === "output-available" || part.output !== undefined) {
+        status = "complete";
+      } else if (part.state === "error" || part.isError) {
+        status = "error";
+      }
+
+      toolCalls.push({
+        toolCallId: part.toolCallId,
+        toolName,
+        args: part.input || part.args || {},
+        result: part.output || part.result,
+        status,
+      });
+    }
+
+    // Also handle standard tool-invocation parts
+    if (part?.type === "tool-invocation" && part.toolInvocation) {
+      const inv = part.toolInvocation;
+      let status: "pending" | "complete" | "error" = "pending";
+      if (inv.state === "result") status = "complete";
+      else if (inv.state === "error") status = "error";
+
+      toolCalls.push({
+        toolCallId: inv.toolCallId,
+        toolName: inv.toolName,
+        args: inv.args || {},
+        result: inv.result,
+        status,
+      });
+    }
+  });
+
+  return toolCalls;
+}
+
+function ToolCallDisplay({
+  toolCall,
+}: {
+  toolCall: {
+    toolCallId: string;
+    toolName: string;
+    args: any;
+    result?: any;
+    status: "pending" | "complete" | "error";
+  };
 }) {
+  const { toolName, args, result, status } = toolCall;
+
   return (
     <div className="border border-gray-200 rounded-lg p-3 mb-2 bg-gray-50 dark:bg-gray-800 dark:border-gray-600">
       <div className="flex items-center gap-2 mb-2">
-        {isRunning ? (
-          <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
-        ) : (
-          <CheckCircle className="w-4 h-4 text-green-500" />
-        )}
+        {status === "pending" && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+        {status === "complete" && <CheckCircle className="w-4 h-4 text-green-500" />}
+        {status === "error" && <AlertCircle className="w-4 h-4 text-red-500" />}
         <span className="font-medium text-sm text-gray-900 dark:text-gray-100">
-          {isRunning ? `Calling ${toolCall.name}...` : `Called ${toolCall.name}`}
+          {status === "pending" && `Calling ${toolName}...`}
+          {status === "complete" && `Called ${toolName}`}
+          {status === "error" && `Error calling ${toolName}`}
         </span>
       </div>
 
       {/* Show tool arguments/input */}
-      {toolCall.args && Object.keys(toolCall.args).length > 0 && (
+      {args && Object.keys(args).length > 0 && (
         <div className="mb-2">
           <div className="text-xs text-gray-600 dark:text-gray-400 mb-1 font-medium">Input:</div>
           <div className="bg-white dark:bg-gray-900 rounded px-3 py-2 text-xs font-mono border border-gray-200 dark:border-gray-700">
-            {JSON.stringify(toolCall.args, null, 2)}
+            {Object.entries(args).map(([key, value]) => (
+              <div key={key} className="mb-1 last:mb-0">
+                <span className="text-blue-600 dark:text-blue-400">{key}:</span>{" "}
+                <span className="text-gray-800 dark:text-gray-200">
+                  {typeof value === "string" ? `"${value}"` : JSON.stringify(value)}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}
-      
+
       {/* Show tool result/output */}
-      {messageContent && !isRunning && (
+      {result !== undefined && (
         <div>
           <div className="text-xs text-gray-600 dark:text-gray-400 mb-1 font-medium">Output:</div>
           <div className="bg-green-50 dark:bg-green-900/20 rounded px-3 py-2 text-xs border border-green-200 dark:border-green-800">
             <span className="text-green-800 dark:text-green-200">
-              {messageContent}
+              {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
             </span>
           </div>
         </div>
@@ -51,97 +134,37 @@ function ToolCallDisplay({
   );
 }
 
-export function ChatMessageBubble(props: { message: Message; aiEmoji?: string; allMessages?: Message[] }) {
-  const toolCalls = props.message.type === 'ai' ? props.message.tool_calls || [] : [];
-  
-  // Get message content as string
-  const getMessageContent = (message: Message): string => {
-    if (typeof message.content === 'string') {
-      return message.content;
-    }
-    if (Array.isArray(message.content)) {
-      return message.content
-        .map(part => {
-          if (typeof part === 'string') return part;
-          if (typeof part === 'object' && 'text' in part) return part.text;
-          return '';
-        })
-        .join('');
-    }
-    return '';
-  };
-
-  const content = getMessageContent(props.message);
-  const hasContent = content.length > 0;
-  const hasToolCalls = toolCalls.length > 0;
-  
-  // Check if tool calls have corresponding tool result messages
-  const hasToolResults = hasToolCalls && props.allMessages && toolCalls.some(toolCall => 
-    props.allMessages!.some(msg => 
-      msg.type === 'tool' && 
-      'tool_call_id' in msg && 
-      msg.tool_call_id === toolCall.id
-    )
-  );
-  
-  // Simple logic: Running = tool calls exist but no tool result messages yet
-  const isRunning = hasToolCalls && !hasToolResults;
-  
-  // Get tool result content for display
-  const getToolResultContent = () => {
-    if (!hasToolCalls || !props.allMessages) return '';
-    
-    for (const toolCall of toolCalls) {
-      const toolResult = props.allMessages.find(msg => 
-        msg.type === 'tool' && 
-        'tool_call_id' in msg && 
-        msg.tool_call_id === toolCall.id
-      );
-      if (toolResult) {
-        return getMessageContent(toolResult);
-      }
-    }
-    return '';
-  };
-  
-  const toolResultContent = getToolResultContent();
-  
-  // Show tool calls if we have any
-  const shouldShowToolCalls = hasToolCalls;
-  
-  if (!(['human', 'ai'].includes(props.message.type) && (hasContent || shouldShowToolCalls))) {
-    return null;
-  }
+export function ChatMessageBubble(props: { message: UIMessage; aiEmoji?: string }) {
+  const { message, aiEmoji } = props;
+  const text = uiMessageToText(message);
+  const toolCalls = getToolCallsFromMessage(message);
 
   return (
     <div
       className={cn(
-        `rounded-[24px] max-w-[80%] mb-8 flex`,
-        props.message.type === 'human' ? 'bg-secondary text-secondary-foreground px-4 py-2' : null,
-        props.message.type === 'human' ? 'ml-auto' : 'mr-auto',
+        "rounded-[24px] max-w-[80%] mb-8 flex",
+        message.role === "user" ? "bg-secondary text-secondary-foreground px-4 py-2" : null,
+        message.role === "user" ? "ml-auto" : "mr-auto",
       )}
     >
-      {props.message.type === 'ai' && (
-        <div className="mr-4 mt-1 border bg-secondary -mt-2 rounded-full w-10 h-10 flex-shrink-0 flex items-center justify-center">
-          {props.aiEmoji}
+      {message.role !== "user" && (
+        <div className="mr-4 -mt-2 mt-1 border bg-secondary rounded-full w-10 h-10 flex-shrink-0 flex items-center justify-center">
+          {aiEmoji}
         </div>
       )}
+
       <div className="chat-message-bubble whitespace-pre-wrap flex flex-col prose dark:prose-invert max-w-none">
-        {shouldShowToolCalls && (
-          <div className="space-y-2 mb-3 not-prose">
-            {toolCalls.map((toolCall) => (
-              <ToolCallDisplay
-                key={toolCall.id}
-                toolCall={toolCall}
-                isRunning={isRunning}
-                messageContent={toolResultContent}
-              />
+        {/* Render tool calls if present */}
+        {toolCalls.length > 0 && (
+          <div className="mb-3">
+            {toolCalls.map((toolCall, index) => (
+              <ToolCallDisplay key={`${toolCall.toolCallId}-${index}`} toolCall={toolCall} />
             ))}
           </div>
         )}
-        {hasContent && (
-          <MemoizedMarkdown content={content} id={props.message.id ?? ''} />
-        )}
+
+        {/* Render text content if present */}
+        {text && <MemoizedMarkdown content={text} id={message.id as any} />}
       </div>
     </div>
   );

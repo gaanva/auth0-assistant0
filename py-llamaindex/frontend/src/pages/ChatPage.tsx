@@ -84,7 +84,7 @@ export default function ChatPage() {
 
   return (
     <ChatWindow
-      endpoint="/api/agent"
+      endpoint="/api/agent/chat"
       emoji="🤖"
       placeholder={`Hello ${user?.name}, I'm your personal assistant. How can I help you today?`}
       emptyStateComponent={InfoCard}
