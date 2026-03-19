@@ -120,8 +120,8 @@ function ChatWindowInner(props: {
   const { messages, sendMessage, status, toolInterrupt } = useInterruptions((handler) =>
     // eslint-disable-next-line react-hooks/rules-of-hooks
     useChat({
-      chatId: props.chatId,
-      initialMessages: props.initialMessages,
+      id: props.chatId,
+      messages: props.initialMessages,
       transport: new DefaultChatTransport({
         api: props.endpoint,
         credentials: "include",

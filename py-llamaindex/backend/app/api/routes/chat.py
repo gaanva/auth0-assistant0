@@ -78,6 +78,11 @@ async def get_thread(
 ):
     user_sub = _get_user_sub(auth_session)
     messages = _get_thread_messages(user_sub, thread_id)
+    logger.info(
+        "GET thread %s for user %s: %d messages (known threads: %s)",
+        thread_id, user_sub, len(messages),
+        list(_threads.get(user_sub, {}).keys()),
+    )
     return JSONResponse(content={"messages": messages})
 
 
@@ -89,6 +94,7 @@ async def chat_stream(
     body = await request.json()
     chat_id = body.get("id") or body.get("chatId") or str(uuid.uuid4())
     messages_data = body.get("messages", [])
+    logger.info("Chat request: chat_id=%s, messages=%d", chat_id, len(messages_data))
 
     credentials = _get_credentials(auth_session)
     user_sub = _get_user_sub(auth_session)
@@ -184,6 +190,7 @@ async def chat_stream(
                 yield _sse({"type": "text-end", "id": text_part_id})
 
             # Persist messages for thread storage
+            logger.info("Saving messages for thread %s (user %s)", chat_id, user_sub)
             user_msg_id = str(uuid.uuid4())
             _save_message(user_sub, chat_id, {
                 "id": user_msg_id,
