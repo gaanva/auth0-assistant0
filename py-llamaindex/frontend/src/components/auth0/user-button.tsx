@@ -1,5 +1,7 @@
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
+import { LogOut, User } from 'lucide-react';
+
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -7,30 +9,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from '@/components/ui/dropdown-menu';
 
 interface KeyValueMap {
   [key: string]: any;
-}
-
-function LogOut() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-      <polyline points="16 17 21 12 16 7"></polyline>
-      <line x1="21" x2="9" y1="12" y2="12"></line>
-    </svg>
-  );
 }
 
 function getAvatarFallback(user: KeyValueMap) {
@@ -47,13 +29,13 @@ function getAvatarFallback(user: KeyValueMap) {
     return nickname[0];
   }
 
-  return name[0];
+  return name?.[0] || 'U';
 }
 
 export default function UserButton({
   user,
   children,
-  logoutUrl = "/api/auth/logout",
+  logoutUrl = '/api/auth/logout',
 }: {
   user: KeyValueMap;
   children?: React.ReactNode;
@@ -83,9 +65,7 @@ export default function UserButton({
             </Avatar>
             <div className="flex flex-col space-y-1">
               <p className="text-sm font-medium leading-none">{name}</p>
-              <p className="text-xs leading-none text-muted-foreground">
-                {email}
-              </p>
+              <p className="text-xs leading-none text-muted-foreground">{email}</p>
             </div>
           </div>
         </DropdownMenuLabel>
@@ -97,6 +77,13 @@ export default function UserButton({
             <DropdownMenuSeparator />
           </>
         )}
+
+        <DropdownMenuItem>
+          <a href="/profile" className="flex gap-2 items-center">
+            <User />
+            Profile
+          </a>
+        </DropdownMenuItem>
 
         <DropdownMenuItem>
           <a href={resolvedLogoutUrl} className="flex gap-2 items-center">
