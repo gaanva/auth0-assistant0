@@ -100,4 +100,4 @@ This project is open-sourced under the MIT License - see the [LICENSE](LICENSE) 
 
 ## Author
 
-This project is built by [Deepu Sasidharan](https://github.com/deepu105).
+This project is built by [Juan Cruz Martinez](https://github.com/jcmartinezdev).
