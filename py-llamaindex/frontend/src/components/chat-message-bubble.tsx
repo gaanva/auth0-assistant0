@@ -148,7 +148,7 @@ export function ChatMessageBubble(props: { message: UIMessage; aiEmoji?: string 
       )}
     >
       {message.role !== "user" && (
-        <div className="mr-4 -mt-2 mt-1 border bg-secondary rounded-full w-10 h-10 flex-shrink-0 flex items-center justify-center">
+        <div className="mr-4 mt-1 border bg-secondary rounded-full w-10 h-10 flex-shrink-0 flex items-center justify-center">
           {aiEmoji}
         </div>
       )}

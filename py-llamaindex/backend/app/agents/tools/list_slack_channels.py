@@ -1,7 +1,7 @@
 import json
 from llama_index.core.tools import FunctionTool
 from auth0_ai_llamaindex.token_vault import get_access_token_from_token_vault
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 
 from app.core.auth0_ai import with_slack_access
@@ -16,9 +16,9 @@ async def list_slack_channels_fn() -> str:
         )
 
     try:
-        client = WebClient(token=access_token)
+        client = AsyncWebClient(token=access_token)
 
-        result = client.conversations_list(
+        result = await client.conversations_list(
             exclude_archived=True,
             types="public_channel,private_channel",
             limit=10,

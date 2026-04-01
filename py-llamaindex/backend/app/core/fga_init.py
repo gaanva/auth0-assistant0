@@ -1,6 +1,9 @@
 import asyncio
 import json
+import logging
 import openfga_sdk
+
+logger = logging.getLogger(__name__)
 from openfga_sdk.client import OpenFgaClient
 from openfga_sdk.credentials import Credentials, CredentialConfiguration
 
@@ -37,7 +40,7 @@ async def main():
     # Write the authorization model
     model = await fga_client.write_authorization_model(json.loads(body_string))
 
-    print(f"NEW MODEL ID: {model.authorization_model_id}")
+    logger.info("NEW MODEL ID: %s", model.authorization_model_id)
 
     # Properly close the client session
     await fga_client.close()

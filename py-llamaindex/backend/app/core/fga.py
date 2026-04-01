@@ -1,4 +1,8 @@
+import logging
+
 from openfga_sdk import ClientConfiguration, OpenFgaClient
+
+logger = logging.getLogger(__name__)
 from openfga_sdk.credentials import Credentials, CredentialConfiguration
 from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
 
@@ -24,7 +28,7 @@ class AuthorizationManager:
             ),
         )
 
-        print("Connecting to FGA...")
+        logger.info("Connecting to FGA...")
         self.openfga_client = OpenFgaClient(openfga_client_config)
 
     async def add_relation(
