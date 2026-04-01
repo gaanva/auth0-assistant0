@@ -93,3 +93,4 @@ venv/
 env/
 
 **/VALIDATION_REPORT.md
+.remember/

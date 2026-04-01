@@ -220,7 +220,8 @@ async def chat_stream(
             yield _sse({"type": "error", "errorText": error_text})
 
         except Exception as e:
-            yield _sse({"type": "error", "errorText": str(e)})
+            logger.exception("Unexpected error in chat stream")
+            yield _sse({"type": "error", "errorText": "An unexpected error occurred"})
 
         yield "data: [DONE]\n\n"
 
