@@ -1,10 +1,10 @@
 import logging
 
 from openfga_sdk import ClientConfiguration, OpenFgaClient
-from openfga_sdk.credentials import Credentials, CredentialConfiguration
-from openfga_sdk.client.models import ClientCheckRequest, ClientTuple, ClientWriteRequest
 
 logger = logging.getLogger(__name__)
+from openfga_sdk.credentials import Credentials, CredentialConfiguration
+from openfga_sdk.client.models import ClientCheckRequest, ClientTuple, ClientWriteRequest
 
 from app.core.config import settings
 

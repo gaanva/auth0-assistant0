@@ -1,6 +1,5 @@
 from datetime import datetime
 import base64
-import uuid
 import PyPDF2
 from io import BytesIO
 from fastapi import APIRouter, Depends, File, UploadFile

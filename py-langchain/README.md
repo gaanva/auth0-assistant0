@@ -1,10 +1,10 @@
 # Assistant0: An AI Personal Assistant Secured with Auth0 - LangGraph Python/FastAPI Version
 
-Assistant0 an AI personal assistant that consolidates your digital life by dynamically accessing multiple tools to help you stay organized and efficient.
+Assistant0 is an AI personal assistant that consolidates your digital life by dynamically accessing multiple tools to help you stay organized and efficient.
 
 ## About the template
 
-This template scaffolds an Auth0 + LangChain.js + Next.js starter app. It mainly uses the following libraries:
+This template scaffolds an Auth0 + LangChain + FastAPI starter app. It mainly uses the following libraries:
 
 - [LangChain's Python framework](https://python.langchain.com/docs/introduction/) and [LangGraph.js](https://langchain-ai.github.io/langgraph/) for building agentic workflows.
 - The [Auth0 AI SDK](https://github.com/auth0/auth0-ai-python) and [Auth0 FastAPI SDK](https://github.com/auth0/auth0-fastapi) to secure the application and call third-party APIs.
@@ -92,7 +92,7 @@ This will start a React vite server on port 5173.
 
 ![A streaming conversation between the user and the AI](./public/images/home-page.png)
 
-Agent configuration lives in `backend/app/agents/assistant0.ts`. From here, you can change the prompt and model, or add other tools and logic.
+Agent configuration lives in `backend/app/agents/assistant0.py`. From here, you can change the prompt and model, or add other tools and logic.
 
 ## License
 

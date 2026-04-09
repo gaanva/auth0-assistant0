@@ -8,6 +8,7 @@ import ChatPage from "@/pages/ChatPage";
 import useAuth, { getLogoutUrl } from "@/lib/use-auth";
 import ClosePage from "@/pages/ClosePage";
 import DocumentsPage from "@/pages/DocumentsPage";
+import ProfilePage from "@/pages/ProfilePage";
 
 export default function Layout() {
   const { user } = useAuth();
@@ -59,6 +60,7 @@ export default function Layout() {
             <Route path="/" element={<ChatPage />} />
             <Route path="/close" element={<ClosePage />} />
             <Route path="/documents" element={<DocumentsPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
           </Routes>
         </div>
       </div>
