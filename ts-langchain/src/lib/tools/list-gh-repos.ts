@@ -7,7 +7,8 @@ export const listRepositoriesTool = tool(
   async () => {
     // Get the access token from Auth0 AI
     const accessToken = await getAccessToken();
-
+    //Me devuelve el GHU: Github Token User, ofuscado de Github.
+    console.log("TOKEN from TOKEN VAULT: " + accessToken);
     // GitHub SDK - dynamically import to avoid module resolution issues
     const { Octokit, RequestError } = await import('octokit');
     try {

@@ -25,6 +25,7 @@ export const withConnection = (connection: string, scopes: string[]) =>
     },
     subjectTokenType: SUBJECT_TOKEN_TYPES.SUBJECT_TYPE_ACCESS_TOKEN,
   });
+  
 
 export const withGmailRead = withConnection('google-oauth2', [
   'openid',

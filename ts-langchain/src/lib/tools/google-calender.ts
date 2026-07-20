@@ -11,15 +11,18 @@ export const getCalendarEventsTool = tool(
   async ({ date }) => {
     // Get the access token from Auth0 AI
     const accessToken = await getAccessToken();
-
+    console.log("TOKEN from TOKEN VAULT: " + accessToken);
     // Google SDK
     try {
+     
       const calendar = google.calendar('v3');
       const auth = new google.auth.OAuth2();
 
       auth.setCredentials({
         access_token: accessToken,
       });
+
+      
 
       // Get events for the entire day
       const response = await calendar.events.list({
@@ -68,7 +71,7 @@ export const getCalendarEventsTool = tool(
     name: 'get_calendar_events',
     description: `Get calendar events for a given date from the user's Google Calendar`,
     schema: z.object({
-      date: z.coerce.date(),
+      date: z.coerce.date().nullable(),
     }),
   },
 );
