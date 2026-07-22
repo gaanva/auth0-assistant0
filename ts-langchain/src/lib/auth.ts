@@ -62,7 +62,8 @@ auth.authenticate(async (request: Request) => {
           issuer: `https://${AUTH0_DOMAIN}/`,
           audience: AUTH0_AUDIENCE,
         });
-
+        
+        console.log("User access_token: " + token);
         console.log("✅ Auth0 JWT payload resolved!", payload);
 
         // Return the verified payload - this becomes available in graph nodes
